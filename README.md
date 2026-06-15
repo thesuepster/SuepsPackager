@@ -18,6 +18,6 @@ Features:
 
 Run this in a terminal to install spkg on your Arch-based system:
 
-curl -fsSL https://raw.githubusercontent.com/thesuepster/Sueps-Packager/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/thesuepster/SuepsPackager/main/install.sh | sudo bash
 
 Feedback is greatly appreciated.

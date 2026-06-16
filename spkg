@@ -1,55 +1,199 @@
 #!/bin/bash
 
-if [[ $EUID -ne 0 ]]; then
-    echo "spkg requires sudo. Try: sudo spkg $*"
-    exit 1
-fi
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+is_installed_pacman() { pacman -Qq "$1" &>/dev/null; }
+is_installed_flatpak() { flatpak list --columns=application | grep -Fxq "$1"; }
+
+get_version_pacman() { pacman -Si "$1" 2>/dev/null | grep "^Version" | awk '{print $3}' | head -n1; }
+get_version_aur()    { paru -Si "$1" 2>/dev/null | grep "^Version" | awk '{print $3}' | head -n1; }
+get_version_flatpak(){ flatpak search --columns=version "$1" 2>/dev/null | tail -n +2 | head -n1; }
+
+require_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "This command requires sudo. Try: sudo spkg $*"
+        exit 1
+    fi
+}
+
+require_sudo_user() {
+    if [[ -z "$SUDO_USER" ]]; then
+        echo "Please run using sudo, not a root shell."
+        exit 1
+    fi
+}
+
+require_paru() {
+    if ! command -v paru &>/dev/null; then
+        echo " AUR support unavailable: paru not installed."
+        return 1
+    fi
+}
+
+require_flatpak() {
+    if ! command -v flatpak &>/dev/null; then
+        echo " Flatpak support unavailable: flatpak not installed."
+        return 1
+    fi
+}
+
+parse_repo_flag() {
+    REPO_FILTER=""
+    NEW_ARGS=()
+    for arg in "$@"; do
+        case "$arg" in
+            --pacman)  REPO_FILTER="pacman" ;;
+            --aur)     REPO_FILTER="aur" ;;
+            --flatpak) REPO_FILTER="flatpak" ;;
+            *)         NEW_ARGS+=("$arg") ;;
+        esac
+    done
+}
+
+print_result() {
+    local pkg=$1 version=$2 source=$3
+    if is_installed_pacman "$pkg" || is_installed_flatpak "$pkg"; then
+        printf " [✓]  %-35s %-20s [%s]\n" "$pkg" "v$version" "$source"
+    else
+        printf " [ ]  %-35s %-20s [%s]\n" "$pkg" "v$version" "$source"
+    fi
+}
+
+# ── Commands ───────────────────────────────────────────────────────────────
 
 cmd_search() {
+    parse_repo_flag "$@"
+    set -- "${NEW_ARGS[@]}"
     local app=$1
+
     if [[ -z "$app" ]]; then
-        echo "Usage: sudo spkg search <app>"
+        echo "Usage: spkg search <app> [--pacman|--aur|--flatpak]"
         exit 1
     fi
 
-    echo "==> Search results for '$app':"
+    # ── Exact results ──
+    echo ""
+    echo "==> Exact results for '$app':"
     echo ""
 
-    local counter=1
+    local found_exact=0
 
-    # Pacman results
-    while IFS= read -r pkg; do
-        local version
-        version=$(pacman -Si "$pkg" 2>/dev/null | grep "^Version" | awk '{print $3}' | head -n1)
-        printf " [%d] %-35s v%-20s [pacman]\n" "$counter" "$pkg" "$version"
-        ((counter++))
-    done < <(pacman -Ssq "$app" 2>/dev/null)
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "pacman" ]]; then
+        while IFS= read -r pkg; do
+            local version; version=$(get_version_pacman "$pkg")
+            print_result "$pkg" "$version" "pacman"
+            found_exact=1
+        done < <(pacman -Ssq "^${app}$" 2>/dev/null)
+    fi
 
-    # AUR results
-    while IFS= read -r pkg; do
-        local version
-        version=$(paru -Si "$pkg" 2>/dev/null | grep "^Version" | awk '{print $3}' | head -n1)
-        printf " [%d] %-35s v%-20s [aur]\n" "$counter" "$pkg" "$version"
-        ((counter++))
-    done < <(paru -Ssq --aur "$app" 2>/dev/null | grep -v "^::")
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "aur" ]]; then
+        if require_paru; then
+            while IFS= read -r pkg; do
+                local version; version=$(get_version_aur "$pkg")
+                print_result "$pkg" "$version" "aur"
+                found_exact=1
+            done < <(paru -Ssq --aur "^${app}$" 2>/dev/null | grep -v "^::")
+        fi
+    fi
 
-    # Flatpak results
-    while IFS= read -r pkg; do
-        [[ -z "$pkg" || "$pkg" == "Application ID" ]] && continue
-        local version
-        version=$(flatpak search --columns=version "$pkg" 2>/dev/null | tail -n +2 | head -n1)
-        printf " [%d] %-35s v%-20s [flatpak]\n" "$counter" "$pkg" "$version"
-        ((counter++))
-    done < <(flatpak search --columns=application "$app" 2>/dev/null | tail -n +2)
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "flatpak" ]]; then
+        if require_flatpak; then
+            while IFS= read -r pkg; do
+                [[ -z "$pkg" || "$pkg" == "Application ID" ]] && continue
+                local version; version=$(get_version_flatpak "$pkg")
+                print_result "$pkg" "$version" "flatpak"
+                found_exact=1
+            done < <(flatpak search --columns=application "$app" 2>/dev/null | tail -n +2 | grep -Fxi "$app")
+        fi
+    fi
 
-    if [[ $counter -eq 1 ]]; then
-        echo " No results found for '$app'."
+    [[ $found_exact -eq 0 ]] && echo " No exact results found."
+
+    # ── Closely related results ──
+    echo ""
+    echo "==> Closely related results:"
+    echo ""
+
+    local found_related=0
+
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "pacman" ]]; then
+        while IFS= read -r pkg; do
+            [[ "$pkg" == "$app" ]] && continue
+            local version; version=$(get_version_pacman "$pkg")
+            print_result "$pkg" "$version" "pacman"
+            found_related=1
+        done < <(pacman -Ssq "^${app}" 2>/dev/null)
+    fi
+
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "aur" ]]; then
+        if require_paru; then
+            while IFS= read -r pkg; do
+                [[ "$pkg" == "$app" ]] && continue
+                local version; version=$(get_version_aur "$pkg")
+                print_result "$pkg" "$version" "aur"
+                found_related=1
+            done < <(paru -Ssq --aur "^${app}" 2>/dev/null | grep -v "^::")
+        fi
+    fi
+
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "flatpak" ]]; then
+        if require_flatpak; then
+            while IFS= read -r pkg; do
+                [[ -z "$pkg" || "$pkg" == "Application ID" || "$pkg" == "$app" ]] && continue
+                local version; version=$(get_version_flatpak "$pkg")
+                print_result "$pkg" "$version" "flatpak"
+                found_related=1
+            done < <(flatpak search --columns=application "$app" 2>/dev/null | tail -n +2 | grep -i "^${app}")
+        fi
+    fi
+
+    [[ $found_related -eq 0 ]] && echo " No closely related results found."
+
+    # ── Extended results ──
+    echo ""
+    read -rp "==> Show all results? This may return many results and slow down search. [y/n]: " choice
+    [[ "$choice" != "y" ]] && return
+
+    echo ""
+    echo "==> All results for '$app':"
+    echo ""
+
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "pacman" ]]; then
+        while IFS= read -r pkg; do
+            [[ "$pkg" == "$app" ]] && continue
+            local version; version=$(get_version_pacman "$pkg")
+            print_result "$pkg" "$version" "pacman"
+        done < <(pacman -Ssq "$app" 2>/dev/null)
+    fi
+
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "aur" ]]; then
+        if require_paru; then
+            while IFS= read -r pkg; do
+                [[ "$pkg" == "$app" ]] && continue
+                local version; version=$(get_version_aur "$pkg")
+                print_result "$pkg" "$version" "aur"
+            done < <(paru -Ssq --aur "$app" 2>/dev/null | grep -v "^::")
+        fi
+    fi
+
+    if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "flatpak" ]]; then
+        if require_flatpak; then
+            while IFS= read -r pkg; do
+                [[ -z "$pkg" || "$pkg" == "Application ID" || "$pkg" == "$app" ]] && continue
+                local version; version=$(get_version_flatpak "$pkg")
+                print_result "$pkg" "$version" "flatpak"
+            done < <(flatpak search --columns=application "$app" 2>/dev/null | tail -n +2)
+        fi
     fi
 }
 
 cmd_install() {
+    require_sudo "$@"
+    parse_repo_flag "$@"
+    set -- "${NEW_ARGS[@]}"
+
     if [[ $# -eq 0 ]]; then
-        echo "Usage: sudo spkg install <app> [app2] [app3]..."
+        echo "Usage: sudo spkg install <app> [app2]... [--pacman|--aur|--flatpak]"
         exit 1
     fi
 
@@ -57,32 +201,41 @@ cmd_install() {
         echo ""
         echo "==> Searching for '$app'..."
 
-        # Try exact match first
-        mapfile -t pacman_results < <(pacman -Ssq "^${app}$" 2>/dev/null)
-        mapfile -t aur_results < <(paru -Ssq --aur "^${app}$" 2>/dev/null | grep -v "^::")
-        mapfile -t flatpak_results < <(flatpak search --columns=application "$app" 2>/dev/null | tail -n +2 | grep -i "^${app}$")
+        mapfile -t pacman_results < <([[ -z "$REPO_FILTER" || "$REPO_FILTER" == "pacman" ]] && pacman -Ssq "^${app}$" 2>/dev/null)
 
-        # Fall back to broad search if nothing found
+        mapfile -t aur_results < <(
+            if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "aur" ]]; then
+                require_paru && paru -Ssq --aur "^${app}$" 2>/dev/null | grep -v "^::"
+            fi
+        )
+
+        mapfile -t flatpak_results < <(
+            if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "flatpak" ]]; then
+                require_flatpak && flatpak search --columns=application "$app" 2>/dev/null | tail -n +2 | grep -Fxi "$app"
+            fi
+        )
+
+        # Fall back to broad search
         if [[ ${#pacman_results[@]} -eq 0 && ${#aur_results[@]} -eq 0 && ${#flatpak_results[@]} -eq 0 ]]; then
-            mapfile -t pacman_results < <(pacman -Ssq "$app" 2>/dev/null)
-            mapfile -t aur_results < <(paru -Ssq --aur "$app" 2>/dev/null | grep -v "^::")
-            mapfile -t flatpak_results < <(flatpak search --columns=application "$app" 2>/dev/null | tail -n +2)
+            mapfile -t pacman_results < <([[ -z "$REPO_FILTER" || "$REPO_FILTER" == "pacman" ]] && pacman -Ssq "$app" 2>/dev/null)
+
+            mapfile -t aur_results < <(
+                if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "aur" ]]; then
+                    require_paru && paru -Ssq --aur "$app" 2>/dev/null | grep -v "^::"
+                fi
+            )
+
+            mapfile -t flatpak_results < <(
+                if [[ -z "$REPO_FILTER" || "$REPO_FILTER" == "flatpak" ]]; then
+                    require_flatpak && flatpak search --columns=application "$app" 2>/dev/null | tail -n +2
+                fi
+            )
         fi
 
-        declare -a all_results
-        declare -a all_sources
-        for pkg in "${pacman_results[@]}"; do
-            all_results+=("$pkg")
-            all_sources+=("pacman")
-        done
-        for pkg in "${aur_results[@]}"; do
-            all_results+=("$pkg")
-            all_sources+=("aur")
-        done
-        for pkg in "${flatpak_results[@]}"; do
-            all_results+=("$pkg")
-            all_sources+=("flatpak")
-        done
+        declare -a all_results all_sources
+        for pkg in "${pacman_results[@]}"; do all_results+=("$pkg"); all_sources+=("pacman"); done
+        for pkg in "${aur_results[@]}";    do all_results+=("$pkg"); all_sources+=("aur");    done
+        for pkg in "${flatpak_results[@]}";do all_results+=("$pkg"); all_sources+=("flatpak");done
 
         local total=${#all_results[@]}
 
@@ -100,8 +253,16 @@ cmd_install() {
                 printf " [%d] %-35s [%s]\n" "$((i+1))" "${all_results[$i]}" "${all_sources[$i]}"
             done
             read -rp "Enter number to install (or 0 to skip): " choice
+            if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+                echo "Invalid input, skipping '$app'."
+                continue
+            fi
             if [[ $choice -eq 0 ]]; then
                 echo "Skipping '$app'."
+                continue
+            fi
+            if [[ $choice -gt $total ]]; then
+                echo "Invalid selection, skipping '$app'."
                 continue
             fi
             local idx=$((choice-1))
@@ -113,8 +274,8 @@ cmd_install() {
 }
 
 _do_install() {
-    local pkg=$1
-    local source=$2
+    local pkg=$1 source=$2
+    require_sudo_user
     case "$source" in
         pacman)  pacman -S "$pkg" ;;
         aur)     sudo -u "$SUDO_USER" paru -S "$pkg" ;;
@@ -123,6 +284,8 @@ _do_install() {
 }
 
 cmd_remove() {
+    require_sudo "$@"
+
     if [[ $# -eq 0 ]]; then
         echo "Usage: sudo spkg remove <app> [app2] [app3]..."
         exit 1
@@ -132,59 +295,162 @@ cmd_remove() {
         echo ""
         echo "==> Searching for installed package '$app'..."
 
-        if pacman -Qq "$app" &>/dev/null; then
+        if is_installed_pacman "$app"; then
             pacman -R "$app"
-        elif flatpak list --columns=application | grep -q "$app"; then
+        elif is_installed_flatpak "$app"; then
             flatpak uninstall "$app"
         else
-            echo "Package '$app' not found in pacman or Flatpak, skipping."
-            echo "If it was installed via AUR, try: paru -R $app"
+            echo " Package '$app' not found in pacman or Flatpak, skipping."
+            echo " If it was installed via AUR, try: paru -R $app"
             continue
         fi
     done
 }
 
 cmd_update() {
+    require_sudo "$@"
+
     if [[ $# -eq 0 ]]; then
-        echo "Usage: sudo spkg update <app>/all [app2] [app3]..."
+        echo "Usage: sudo spkg update <app>|all [app2] [app3]..."
         exit 1
     fi
 
     if [[ "$1" == "all" ]]; then
-        echo "==> Updating all pacman & AUR packages..."
-        paru -Syu
-
+        if require_paru; then
+            echo "==> Updating all pacman & AUR packages..."
+            paru -Syu
+        else
+            echo "==> Updating pacman packages only (paru unavailable)..."
+            pacman -Syu
+        fi
         echo ""
-        echo "==> Updating all Flatpak packages..."
-        flatpak update
+        if require_flatpak; then
+            echo "==> Updating all Flatpak packages..."
+            flatpak update
+        fi
     else
         for app in "$@"; do
             echo ""
             echo "==> Updating '$app'..."
-
-            if pacman -Qq "$app" &>/dev/null; then
-                paru -S "$app"
-            elif flatpak list --columns=application | grep -q "$app"; then
+            if is_installed_pacman "$app"; then
+                if require_paru; then
+                    paru -S "$app"
+                else
+                    pacman -S "$app"
+                fi
+            elif is_installed_flatpak "$app"; then
                 flatpak update "$app"
             else
-                echo "Package '$app' not found, skipping."
+                echo " Package '$app' not found, skipping."
                 continue
             fi
         done
     fi
 }
 
+cmd_info() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: spkg info <app>"
+        exit 1
+    fi
+
+    local app=$1
+    echo ""
+
+    if is_installed_pacman "$app"; then
+        local info; info=$(pacman -Si "$app" 2>/dev/null)
+        local name;    name=$(echo "$info"    | grep "^Name"        | awk -F': ' '{print $2}' | xargs)
+        local version; version=$(echo "$info" | grep "^Version"     | awk -F': ' '{print $2}' | xargs)
+        local repo;    repo=$(echo "$info"    | grep "^Repository"  | awk -F': ' '{print $2}' | xargs)
+        local desc;    desc=$(echo "$info"    | grep "^Description" | awk -F': ' '{print $2}' | xargs)
+        echo " Name:        $name"
+        echo " Version:     $version"
+        echo " Repository:  $repo"
+        echo " Description: $desc"
+        echo " Installed:   Yes"
+    elif is_installed_flatpak "$app"; then
+        local version; version=$(flatpak info "$app" 2>/dev/null | grep "Version" | awk '{print $2}')
+        echo " Name:        $app"
+        echo " Version:     $version"
+        echo " Repository:  flatpak"
+        echo " Installed:   Yes"
+    else
+        local info; info=$(pacman -Si "$app" 2>/dev/null)
+        if [[ -n "$info" ]]; then
+            local name;    name=$(echo "$info"    | grep "^Name"        | awk -F': ' '{print $2}' | xargs)
+            local version; version=$(echo "$info" | grep "^Version"     | awk -F': ' '{print $2}' | xargs)
+            local repo;    repo=$(echo "$info"    | grep "^Repository"  | awk -F': ' '{print $2}' | xargs)
+            local desc;    desc=$(echo "$info"    | grep "^Description" | awk -F': ' '{print $2}' | xargs)
+            echo " Name:        $name"
+            echo " Version:     $version"
+            echo " Repository:  $repo"
+            echo " Description: $desc"
+            echo " Installed:   No"
+        else
+            if require_paru; then
+                local aur_info; aur_info=$(paru -Si "$app" 2>/dev/null)
+                if [[ -n "$aur_info" ]]; then
+                    local name;    name=$(echo "$aur_info"    | grep "^Name"        | awk -F': ' '{print $2}' | xargs)
+                    local version; version=$(echo "$aur_info" | grep "^Version"     | awk -F': ' '{print $2}' | xargs)
+                    local desc;    desc=$(echo "$aur_info"    | grep "^Description" | awk -F': ' '{print $2}' | xargs)
+                    echo " Name:        $name"
+                    echo " Version:     $version"
+                    echo " Repository:  aur"
+                    echo " Description: $desc"
+                    echo " Installed:   No"
+                else
+                    echo " No info found for '$app'."
+                fi
+            fi
+        fi
+    fi
+    echo ""
+}
+
+cmd_doctor() {
+    echo ""
+    echo "==> spkg system check:"
+    echo ""
+
+    for tool in pacman paru flatpak curl gpg sha256sum; do
+        if command -v "$tool" &>/dev/null; then
+            printf " ✓ %-15s available\n" "$tool"
+        else
+            printf " ✗ %-15s missing\n" "$tool"
+        fi
+    done
+    echo ""
+}
+
+# ── Entry point ────────────────────────────────────────────────────────────
+
 ACTION=$1
 APP=$2
 
 case "$ACTION" in
     install) shift; cmd_install "$@" ;;
-    remove)  shift; cmd_remove "$@" ;;
-    update)  shift; cmd_update "$@" ;;
-    search)  cmd_search "$APP" ;;
+    remove)  shift; cmd_remove  "$@" ;;
+    update)  shift; cmd_update  "$@" ;;
+    search)  shift; cmd_search  "$@" ;;
+    info)    cmd_info "$APP" ;;
+    doctor)  cmd_doctor ;;
     *)
-        echo "Usage: sudo spkg install/remove/update/search <app>"
-        echo "       sudo spkg update all"
+        echo ""
+        echo "Usage: spkg <command> [options]"
+        echo ""
+        echo " Commands:"
+        echo "   install <app> [app2]...   Install one or more packages"
+        echo "   remove  <app> [app2]...   Remove one or more packages"
+        echo "   update  <app>|all         Update a package or everything"
+        echo "   search  <app>             Search for a package"
+        echo "   info    <app>             Show package details"
+        echo "   doctor                    Check system dependencies"
+        echo ""
+        echo " Flags:"
+        echo "   --pacman   Only search/install from pacman"
+        echo "   --aur      Only search/install from AUR"
+        echo "   --flatpak  Only search/install from Flatpak"
+        echo ""
         exit 1
         ;;
 esac

@@ -1,6 +1,6 @@
 # Suep's Packager (spkg)
 
-A package manager wrapper for Arch-based Linux systems. spkg searches and installs packages from Pacman, the AUR (via Paru), and Flatpak — all from one command.
+A package manager wrapper for Arch-based Linux systems, written in Go. spkg searches and installs packages from Pacman, the AUR (via Paru), and Flatpak — all from one command.
 
 ---
 
@@ -10,14 +10,21 @@ Run this in a terminal to install spkg on your Arch-based system:
 
     curl -fsSL https://raw.githubusercontent.com/thesuepster/SuepsPackager/main/install.sh | sudo bash
 
-The installer will download spkg, verify its SHA256 checksum, and install it to `/usr/local/bin/`.
+The installer downloads the spkg source, builds it with `go build`, and installs the resulting binary to `/usr/local/bin/`.
 
-**Dependencies:** Make sure you have `paru` and `flatpak` installed for full functionality:
+**Dependencies:** Building requires the Go toolchain. Make sure you also have `paru` and `flatpak` installed for full functionality:
 
-    sudo pacman -S flatpak
+    sudo pacman -S go flatpak
     paru -S paru  # if not already installed
 
 Run `spkg doctor` after installing to check your setup.
+
+### Building from source manually
+
+    git clone https://github.com/thesuepster/SuepsPackager.git
+    cd SuepsPackager
+    go build -o spkg ./cmd/spkg
+    sudo install -m 755 spkg /usr/local/bin/spkg
 
 ---
 
@@ -84,7 +91,7 @@ spkg doctor
 - `search`, `info`, and `doctor` do not require sudo
 - `install`, `remove`, and `update` require sudo
 - spkg must be run with `sudo`, not from a root shell directly
-- SHA256 integrity verification is performed on every install
+- Building from source means you're compiling exactly what's in this repo — read it before you build it
 - GPG signing coming in a future release
 
 ---

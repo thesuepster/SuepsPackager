@@ -7,9 +7,15 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+if ! command -v go &>/dev/null; then
+    echo "ERROR: the Go toolchain is required to build spkg."
+    echo "Install it with: sudo pacman -S go"
+    exit 1
+fi
+
 INSTALL_DIR="/usr/local/bin"
-SPKG_URL="https://raw.githubusercontent.com/thesuepster/SuepsPackager/main/spkg"
-HASH_URL="https://raw.githubusercontent.com/thesuepster/SuepsPackager/main/spkg.sha256"
+REF="${SPKG_REF:-main}"
+SRC_URL="https://codeload.github.com/thesuepster/SuepsPackager/tar.gz/refs/heads/${REF}"
 
 TMP_DIR=$(mktemp -d)
 
@@ -19,30 +25,23 @@ cleanup() {
 
 trap cleanup EXIT
 
-echo "Downloading spkg..."
+echo "Downloading spkg source (${REF})..."
 
-curl -fsSL "$SPKG_URL" -o "$TMP_DIR/spkg"
-curl -fsSL "$HASH_URL" -o "$TMP_DIR/spkg.sha256"
+curl -fsSL "$SRC_URL" -o "$TMP_DIR/source.tar.gz"
 
+echo "Extracting..."
 
-echo "Verifying checksum..."
+tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR"
 
-cd "$TMP_DIR"
+SRC_DIR=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d)
 
-if ! sha256sum -c spkg.sha256; then
-    echo "ERROR: SHA256 verification failed!"
-    echo "The downloaded file may be corrupted or tampered with."
-    exit 1
-fi
+echo "Building spkg..."
 
-
-echo "Checksum verified."
+(cd "$SRC_DIR" && go build -o "$TMP_DIR/spkg" ./cmd/spkg)
 
 echo "Installing spkg..."
 
-install -m 755 spkg "$INSTALL_DIR/spkg"
+install -m 755 "$TMP_DIR/spkg" "$INSTALL_DIR/spkg"
 
-
-echo "Done!"
 echo "Done! Run 'spkg doctor' to verify your setup works."
 echo "Try: spkg search <app>"

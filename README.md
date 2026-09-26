@@ -15,7 +15,17 @@ The installer downloads the spkg source, builds it with `go build`, and installs
 **Dependencies:** Building requires the Go toolchain. Make sure you also have `paru` and `flatpak` installed for full functionality:
 
     sudo pacman -S go flatpak
-    paru -S paru  # if not already installed
+
+`paru` itself isn't in the official Arch repos, so how you get it depends on what you're running:
+
+- **Base Arch:** paru is AUR-only, so bootstrap it manually:
+
+      sudo pacman -S --needed base-devel git
+      git clone https://aur.archlinux.org/paru.git
+      cd paru
+      makepkg -si
+
+- **Some Arch-based distros (e.g. CachyOS):** paru ships in the distro's own main repo, so a plain `sudo pacman -S paru` is enough.
 
 Run `spkg doctor` after installing to check your setup.
 
